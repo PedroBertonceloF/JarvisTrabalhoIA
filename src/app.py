@@ -1,7 +1,16 @@
-import streamlit as st
+import sys
 import os
+from pathlib import Path
+
+# Adiciona o diretório raiz do projeto ao PYTHONPATH
+project_root = Path(__file__).parent.parent
+sys.path.append(str(project_root))
+
+import streamlit as st
 from src.storage import Storage
 from src.llm import JarvisLLM
+from src.rag import RAGService
+import PyPDF2
 
 st.set_page_config(page_title="Jarvis Acadêmico", page_icon="🎓", layout="wide")
 
@@ -9,11 +18,15 @@ st.set_page_config(page_title="Jarvis Acadêmico", page_icon="🎓", layout="wid
 @st.cache_resource
 def get_services():
     db_path = os.getenv("SQLITE_DB_PATH", "./data/jarvis.db")
+    chroma_path = os.getenv("DB_PATH", "./data/chroma_db")
+    
     storage = Storage(db_path)
-    llm = JarvisLLM(storage)
-    return llm, storage
+    rag_service = RAGService(chroma_path)
+    llm = JarvisLLM(storage, rag_service)
+    
+    return llm, storage, rag_service
 
-llm_service, storage_service = get_services()
+llm_service, storage_service, rag_service = get_services()
 
 st.title("🎓 Jarvis Acadêmico")
 st.subheader("Seu Assistente Pessoal de Estudos")
@@ -66,13 +79,44 @@ if prompt := st.chat_input("Como posso te ajudar hoje?"):
         except Exception as e:
             st.error(f"Erro ao comunicar com o LLM: {e}")
 
-# Sidebar para informações extras
+# Sidebar para informações extras e Upload
 with st.sidebar:
-    st.title("Configurações")
-    st.info("Aqui você poderá gerenciar suas Disciplinas e Materiais em breve.")
+    st.title("📚 Materiais de Estudo")
+    
+    disciplina_input = st.text_input("Nome da Disciplina (ex: Inteligência Artificial)")
+    uploaded_file = st.file_uploader("Envie seu material (PDF ou TXT)", type=['pdf', 'txt'])
+    
+    if st.button("Processar e Salvar Material"):
+        if uploaded_file is not None and disciplina_input:
+            with st.spinner("Lendo e vetorizando o documento..."):
+                text_content = ""
+                # Processa TXT
+                if uploaded_file.name.endswith('.txt'):
+                    text_content = uploaded_file.getvalue().decode("utf-8")
+                # Processa PDF
+                elif uploaded_file.name.endswith('.pdf'):
+                    pdf_reader = PyPDF2.PdfReader(uploaded_file)
+                    for page in pdf_reader.pages:
+                        text_content += page.extract_text() + "\n"
+                
+                # Envia para o RAG
+                if text_content:
+                    success = rag_service.ingest_text(
+                        text=text_content, 
+                        disciplina=disciplina_input, 
+                        source_name=uploaded_file.name
+                    )
+                    if success:
+                        st.success(f"Material '{uploaded_file.name}' salvo em '{disciplina_input}'!")
+                    else:
+                        st.error("Erro ao salvar no banco vetorial.")
+                else:
+                    st.warning("Não foi possível extrair texto do arquivo.")
+        else:
+            st.warning("Por favor, preencha a disciplina e anexe um arquivo.")
     
     st.divider()
-    st.subheader("Estado do Banco")
+    st.title("📅 Agenda")
     if st.button("Ver Tarefas Salvas"):
         tasks = storage_service.get_all_tasks()
         st.write(tasks)

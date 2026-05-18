@@ -8,9 +8,13 @@ def mock_storage():
     return MagicMock()
 
 @pytest.fixture
-def llm_service(mock_storage):
+def mock_rag():
+    return MagicMock()
+
+@pytest.fixture
+def llm_service(mock_storage, mock_rag):
     with patch('src.llm.OpenAI'):
-        return JarvisLLM(mock_storage)
+        return JarvisLLM(mock_storage, mock_rag)
 
 def test_chat_simple_response(llm_service):
     # Simula a resposta da OpenAI
