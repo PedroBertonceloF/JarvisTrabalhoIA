@@ -4,17 +4,16 @@ from unittest.mock import MagicMock, patch
 from src.llm import JarvisLLM
 
 @pytest.fixture
-def mock_storage():
-    return MagicMock()
+def mock_registry():
+    registry = MagicMock()
+    # Para o teste não quebrar se ele pedir schemas:
+    registry.get_tools.return_value = [{"type": "function", "function": {"name": "adicionar_tarefa"}}]
+    return registry
 
 @pytest.fixture
-def mock_rag():
-    return MagicMock()
-
-@pytest.fixture
-def llm_service(mock_storage, mock_rag):
+def llm_service(mock_registry):
     with patch('src.llm.OpenAI'):
-        return JarvisLLM(mock_storage, mock_rag)
+        return JarvisLLM(mock_registry)
 
 def test_chat_simple_response(llm_service):
     # Simula a resposta da OpenAI
@@ -30,19 +29,20 @@ def test_chat_simple_response(llm_service):
     assert response == "Olá, eu sou o Jarvis!"
     llm_service.client.chat.completions.create.assert_called_once()
 
-def test_chat_tool_call_add_task(llm_service, mock_storage):
-    # Simula o LLM decidindo chamar uma ferramenta
-    mock_tool_call = MagicMock()
-    mock_tool_call.function.name = "adicionar_tarefa"
-    mock_tool_call.function.arguments = json.dumps({
-        "descricao": "Estudar para prova",
-        "data_entrega": "2026-05-20"
+def test_chat_tool_call(llm_service, mock_registry):
+    # Simula o LLM decidindo chamar uma ferramenta via conteúdo (formato customizado do Jarvis)
+    tool_call_json = json.dumps({
+        "tool_call": "adicionar_tarefa",
+        "arguments": {
+            "descricao": "Estudar para prova",
+            "data_entrega": "2026-05-20"
+        }
     })
-    mock_tool_call.id = "call_123"
+    tool_call_content = f"```json\n{tool_call_json}\n```"
 
-    # Primeira resposta: LLM pede a ferramenta
+    # Primeira resposta: LLM pede a ferramenta no content
     mock_response_1 = MagicMock()
-    mock_message_1 = MagicMock(content=None, tool_calls=[mock_tool_call])
+    mock_message_1 = MagicMock(content=tool_call_content)
     mock_response_1.choices = [MagicMock(message=mock_message_1)]
 
     # Segunda resposta: LLM confirma após execução
@@ -52,10 +52,17 @@ def test_chat_tool_call_add_task(llm_service, mock_storage):
     ]
 
     llm_service.client.chat.completions.create.side_effect = [mock_response_1, mock_response_2]
+    
+    # Simula a execução da ferramenta no registry
+    mock_registry.execute.return_value = "Tarefa 1 adicionada."
 
     messages = [{"role": "user", "content": "Adicione uma tarefa"}]
     response = llm_service.chat(messages)
 
-    # Verifica se o storage foi chamado corretamente
-    mock_storage.add_task.assert_called_once_with(description="Estudar para prova", due_date="2026-05-20")
+    # Verifica se o registry foi chamado corretamente
+    mock_registry.execute.assert_called_once_with(
+        "adicionar_tarefa", 
+        {"descricao": "Estudar para prova", "data_entrega": "2026-05-20"}
+    )
     assert response == "Tarefa adicionada!"
+

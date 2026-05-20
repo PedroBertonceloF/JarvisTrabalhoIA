@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+logs/*.jsonl
+storage/*.json
+storage/index_cache/
+.DS_Store

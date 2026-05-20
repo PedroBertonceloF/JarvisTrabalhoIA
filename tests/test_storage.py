@@ -53,3 +53,36 @@ def test_get_agenda_by_date(temp_db):
     assert len(agenda["tasks"]) == 1
     assert agenda["events"][0]["description"] == "Aula de IA"
     assert agenda["tasks"][0]["description"] == "Estudar para prova"
+
+def test_get_agenda_by_date_range(temp_db):
+    temp_db.add_event("Aula 1", "2026-05-18", "19:00")
+    temp_db.add_task("Tarefa 1", "2026-05-19")
+    temp_db.add_event("Aula 2", "2026-05-20", "19:00")
+    temp_db.add_task("Tarefa 2", "2026-05-21")
+    
+    agenda = temp_db.get_agenda_by_date_range("2026-05-18", "2026-05-20")
+    
+    # Deve conter Aula 1, Tarefa 1 e Aula 2
+    assert len(agenda["events"]) == 2
+    assert len(agenda["tasks"]) == 1
+    assert "Aula 1" in [e["description"] for e in agenda["events"]]
+    assert "Aula 2" in [e["description"] for e in agenda["events"]]
+    assert "Tarefa 1" in [t["description"] for t in agenda["tasks"]]
+    assert "Tarefa 2" not in [t["description"] for t in agenda["tasks"]]
+
+def test_add_and_get_difficulties(temp_db):
+    # Setup
+    temp_db.add_difficulty("Inteligência Artificial", "Redes Neurais")
+    temp_db.add_difficulty("Inteligência Artificial", "Backpropagation")
+    temp_db.add_difficulty("Banco de Dados", "Normalização")
+    
+    # Execução
+    dificuldades_ia = temp_db.get_difficulties("Inteligência Artificial")
+    dificuldades_bd = temp_db.get_difficulties("Banco de Dados")
+    
+    # Asserções
+    assert len(dificuldades_ia) == 2
+    assert "Redes Neurais" in [d["topic"] for d in dificuldades_ia]
+    assert len(dificuldades_bd) == 1
+    assert "Normalização" in [d["topic"] for d in dificuldades_bd]
+

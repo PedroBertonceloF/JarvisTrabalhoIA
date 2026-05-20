@@ -6,160 +6,107 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class JarvisLLM:
-    def __init__(self, storage, rag_service):
-        self.storage = storage
-        self.rag_service = rag_service
+    def __init__(self, tool_registry):
+        self.tool_registry = tool_registry
         self.client = OpenAI(
-            base_url=os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1"),
-            api_key=os.getenv("OPENAI_API_KEY", "ollama")
+            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("OPENAI_API_KEY")
         )
-        self.model = os.getenv("MODEL_NAME", "gemma")
+        self.model = os.getenv("MODEL_NAME")
 
-    def get_tools(self):
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "adicionar_tarefa",
-                    "description": "Adiciona uma nova tarefa à agenda do usuário.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "descricao": {"type": "string", "description": "A descrição da tarefa."},
-                            "data_entrega": {"type": "string", "description": "Data de entrega (YYYY-MM-DD)."}
-                        },
-                        "required": ["descricao", "data_entrega"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "consultar_agenda",
-                    "description": "Consulta eventos e tarefas agendados para uma data específica.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "data": {"type": "string", "description": "Data da consulta no formato YYYY-MM-DD."}
-                        },
-                        "required": ["data"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "listar_tarefas",
-                    "description": "Retorna todas as tarefas salvas no sistema, incluindo seus IDs e status.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "concluir_tarefa",
-                    "description": "Marca uma tarefa específica como concluída usando o seu ID.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": {"type": "integer", "description": "O ID numérico da tarefa."}
-                        },
-                        "required": ["task_id"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "buscar_material_rag",
-                    "description": "Busca informações detalhadas nos materiais de estudo anexados pelo usuário. Use esta ferramenta sempre que o usuário fizer perguntas sobre conteúdos acadêmicos, matérias ou disciplinas.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "pergunta": {"type": "string", "description": "A pergunta específica ou os termos de busca a serem procurados no material."}
-                        },
-                        "required": ["pergunta"]
-                    }
-                }
-            }
-        ]
+    def _build_system_prompt(self):
+        tools = self.tool_registry.get_tools()
+        if not tools:
+            return "Você é o Jarvis, um assistente acadêmico autônomo."
+            
+        prompt = "Você é o Jarvis, um assistente acadêmico autônomo. Você tem acesso às seguintes ferramentas:\n\n"
+        for t in tools:
+            func = t.get("function", {})
+            prompt += f"- Nome da ferramenta: {func.get('name')}\n"
+            prompt += f"  Descrição: {func.get('description')}\n"
+            prompt += f"  Parâmetros: {json.dumps(func.get('parameters', {}), ensure_ascii=False)}\n\n"
+            
+        prompt += """
+IMPORTANTE: Se você precisar consultar a agenda, adicionar tarefas ou buscar material, você DEVE usar uma das ferramentas acima.
+Para usar uma ferramenta, a sua resposta DEVE ser EXCLUSIVAMENTE um objeto JSON válido, sem nenhum texto antes ou depois, seguindo este exato formato:
+
+```json
+{
+    "tool_call": "nome_da_ferramenta",
+    "arguments": {
+        "chave_do_parametro": "valor"
+    }
+}
+```
+
+Se você não precisar de nenhuma ferramenta (por exemplo, se já tiver a informação para responder ou for uma conversa casual), responda normalmente em linguagem natural.
+"""
+        return prompt
+
+    def _parse_tool_call(self, text):
+        if not text:
+            return None
+        try:
+            cleaned = text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:-3].strip()
+            elif cleaned.startswith("```"):
+                cleaned = cleaned[3:-3].strip()
+            
+            data = json.loads(cleaned)
+            if "tool_call" in data:
+                return data
+        except json.JSONDecodeError:
+            pass
+        return None
 
     def chat(self, messages):
+        system_msg = {"role": "system", "content": self._build_system_prompt()}
+        
+        # Filtra mensagens antigas de sistema para não poluir
+        filtered_messages = [m for m in messages if m.get("role") not in ["system", "tool_call_request", "tool_call_result"]]
+        current_context = [system_msg] + filtered_messages
+        
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
-            tools=self.get_tools()
+            messages=current_context
         )
         
-        response_message = response.choices[0].message
+        response_text = response.choices[0].message.content
+        parsed_tool = self._parse_tool_call(response_text)
         
-        # Verifica se o LLM decidiu chamar alguma ferramenta
-        if response_message.tool_calls:
-            # Adiciona a mensagem do assistente (com a chamada da ferramenta) ao histórico
-            messages.append(response_message)
+        if parsed_tool:
+            func_name = parsed_tool.get("tool_call")
+            func_args = parsed_tool.get("arguments", {})
             
-            for tool_call in response_message.tool_calls:
-                function_name = tool_call.function.name
-                # Fallback para string vazia se arguments vier None (algumas LLMs fazem isso)
-                args_str = tool_call.function.arguments or "{}"
-                try:
-                    function_args = json.loads(args_str)
-                except json.JSONDecodeError:
-                    function_args = {}
-                
-                # Executa a função correspondente
-                if function_name == "adicionar_tarefa":
-                    task_id = self.storage.add_task(
-                        description=function_args.get("descricao", "Sem descrição"),
-                        due_date=function_args.get("data_entrega", "Sem data")
-                    )
-                    function_response = f"Tarefa adicionada com sucesso! ID: {task_id}"
-                
-                elif function_name == "consultar_agenda":
-                    data = function_args.get("data", "")
-                    agenda = self.storage.get_agenda_by_date(data)
-                    function_response = json.dumps(agenda, ensure_ascii=False)
-                
-                elif function_name == "listar_tarefas":
-                    tarefas = self.storage.get_all_tasks()
-                    function_response = json.dumps(tarefas, ensure_ascii=False)
-                    
-                elif function_name == "concluir_tarefa":
-                    task_id = function_args.get("task_id")
-                    if task_id and self.storage.complete_task(task_id):
-                        function_response = f"Tarefa {task_id} concluída com sucesso!"
-                    else:
-                        function_response = f"Falha ao concluir tarefa {task_id}."
-                
-                elif function_name == "buscar_material_rag":
-                    pergunta = function_args.get("pergunta", "")
-                    resultados = self.rag_service.search(pergunta)
-                    if resultados:
-                        function_response = json.dumps(resultados, ensure_ascii=False)
-                    else:
-                        function_response = "Nenhuma informação relevante encontrada nos materiais anexados."
-                
-                else:
-                    function_response = "Ferramenta desconhecida."
-                
-                # Adiciona o resultado da ferramenta ao histórico
-                messages.append(
-                    {
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": function_name,
-                        "content": function_response,
-                    }
-                )
+            # Adiciona ao histórico do Streamlit para log visual
+            messages.append({
+                "role": "tool_call_request",
+                "tool_name": func_name,
+                "tool_args": json.dumps(func_args, ensure_ascii=False)
+            })
             
-            # Chama o LLM novamente com o resultado da ferramenta
+            # Executa a função localmente
+            function_response = self.tool_registry.execute(func_name, func_args)
+            
+            # Adiciona resultado ao histórico do Streamlit para log visual
+            messages.append({
+                "role": "tool_call_result",
+                "content": str(function_response)
+            })
+            
+            # Adiciona a requisição e a resposta ao contexto do LLM para a segunda chamada
+            current_context.append({"role": "assistant", "content": response_text})
+            current_context.append({
+                "role": "user",
+                "content": f"RESULTADO DA FERRAMENTA '{func_name}':\n{function_response}\n\nBaseado neste resultado, continue respondendo ao meu pedido original ou formule sua resposta final."
+            })
+            
+            # Chama o LLM novamente com o resultado
             second_response = self.client.chat.completions.create(
                 model=self.model,
-                messages=messages
+                messages=current_context
             )
             return second_response.choices[0].message.content
 
-        return response_message.content
+        return response_text
